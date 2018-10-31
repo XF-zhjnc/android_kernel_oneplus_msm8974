@@ -542,6 +542,62 @@ int alarm_start_relative(struct alarm *alarm, ktime_t start)
 	return alarm_start(alarm, start);
 }
 
+static void alarm_enqueue_locked(struct alarm *alarm)
+{
+	struct alarm_queue *base = &alarms[alarm->type];
+	struct rb_node **link = &base->alarms.rb_node;
+	struct rb_node *parent = NULL;
+	struct alarm *entry;
+	int leftmost = 1;
+	bool was_first = false;
+ 	pr_alarm(FLOW, "added alarm, type %d, func %pF at %lld\n",
+		alarm->type, alarm->function, ktime_to_ns(alarm->expires));
+ 	if (base->first == &alarm->node) {
+		base->first = rb_next(&alarm->node);
+		was_first = true;
+	}
+	if (!RB_EMPTY_NODE(&alarm->node)) {
+		rb_erase(&alarm->node, &base->alarms);
+		RB_CLEAR_NODE(&alarm->node);
+	}
+ 	while (*link) {
+		parent = *link;
+		entry = rb_entry(parent, struct alarm, node);
+		/*
+  		* We dont care about collisions. Nodes with
+ 		* the same expiry time stay together.
+  		*/
+		if (alarm->expires.tv64 < entry->expires.tv64) {
+			link = &(*link)->rb_left;
+		} else {
+			link = &(*link)->rb_right;
+			leftmost = 0;
+		}
+	}
+	if (leftmost)
+		base->first = &alarm->node;
+	if (leftmost || was_first)
+		update_timer_locked(base, was_first);
+ 	rb_link_node(&alarm->node, parent, link);
+	rb_insert_color(&alarm->node, &base->alarms);
+}
+
+/**
+ * alarm_start_range - (re)start an alarm
+ * @alarm:	the alarm to be added
+ * @start:	earliest expiry time
+ * @end:	expiry time
+ */
+void alarm_start_range(struct alarm *alarm, ktime_t start, ktime_t end)
+{
+	unsigned long flags;
+ 	spin_lock_irqsave(&alarm_slock, flags);
+	alarm->softexpires = start;
+	alarm->expires = end;
+	alarm_enqueue_locked(alarm);
+	spin_unlock_irqrestore(&alarm_slock, flags);
+}
+
 void alarm_restart(struct alarm *alarm)
 {
 	struct alarm_base *base = &alarm_bases[alarm->type];
